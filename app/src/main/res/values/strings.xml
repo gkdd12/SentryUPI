@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">SentryUPI</string>
+    <string name="accessibility_service_description">SentryUPI monitors payment app launches to provide visual spending alerts.</string>
+</resources>
