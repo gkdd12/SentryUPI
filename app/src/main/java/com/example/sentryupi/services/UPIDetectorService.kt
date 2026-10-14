@@ -1,6 +1,7 @@
 package com.example.sentryupi.services
 
 import android.accessibilityservice.AccessibilityService
+import android.view.accessibility.AccessibilityNodeInfo
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
@@ -20,12 +21,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.regex.Pattern
 
 class UPIDetectorService : AccessibilityService() {
 
     private var lastActivePackage: String = ""
     private lateinit var repository: BudgetRepository
     private val serviceScope = CoroutineScope(Dispatchers.IO)
+    private var lastProcessedTransactionTime: Long = 0L
+    private val successKeywords = listOf("Paid successfully", "Payment Successful", "Transfer Successful", "Paid ₹")
+    private val amountRegex = Pattern.compile("(?:₹|Rs\\.?)\\s*([0-9,]+(?:\\.[0-9]{1,2})?)")
 
     companion object {
         private const val TAG = "SentryUPI_Service"
@@ -53,30 +58,39 @@ class UPIDetectorService : AccessibilityService() {
             ?: event.packageName?.toString()
             ?: return
 
-        // Ignore SentryUPI and PauseActivity so they don't trigger recursive loops
         if (activePackage == packageName || activePackage.contains("sentryupi")) return
 
-        if (activePackage != lastActivePackage) {
-            lastActivePackage = activePackage
-
-            if (TargetUPIApps.contains(activePackage)) {
+        if (TargetUPIApps.contains(activePackage)) {
+            // 1. Detect app launch
+            if (activePackage != lastActivePackage) {
+                lastActivePackage = activePackage
                 Log.d(TAG, "🟢 Target UPI App Launched: $activePackage")
                 evaluateZoneAndRespond(activePackage)
             }
+
+            // 2. Scan active screen for payment success text nodes
+            val rootNode = rootInActiveWindow ?: return
+            scanForPaymentSuccess(rootNode)
+        } else {
+            lastActivePackage = activePackage
         }
     }
 
     private fun evaluateZoneAndRespond(activePackage: String) {
         serviceScope.launch {
             val config = repository.budgetConfigFlow.first()
-            val currentZone = config.getZone()
 
+            // 1. Check for 7-Day Re-Verification Prompt
+            if (config.isVerificationDue()) {
+                sendVerificationReminderNotification()
+            }
+
+            // 2. Evaluate Zone Status
+            val currentZone = config.getZone()
             Log.d(TAG, "Budget Config Loaded. Current Zone: ${currentZone.name}")
 
             when (currentZone) {
-                BudgetZone.GREEN -> {
-                    Log.d(TAG, "Green Zone: Safe spending. No alerts.")
-                }
+                BudgetZone.GREEN -> Log.d(TAG, "Green Zone: Safe spending.")
                 BudgetZone.YELLOW -> {
                     triggerHapticPulse()
                     sendYellowNotification(config)
@@ -149,5 +163,75 @@ class UPIDetectorService : AccessibilityService() {
 
     override fun onInterrupt() {
         Log.d(TAG, "Accessibility Service Interrupted")
+    }
+
+    private fun scanForPaymentSuccess(node: AccessibilityNodeInfo) {
+        val allTexts = mutableListOf<String>()
+        collectNodeText(node, allTexts)
+
+        val fullScreenText = allTexts.joinToString(" ")
+
+        // Only trigger if screen explicitly contains payment success AND live action buttons like "Done" or "View Details"
+        val isLiveSuccessScreen = successKeywords.any { keyword -> fullScreenText.contains(keyword, ignoreCase = true) }
+                && (fullScreenText.contains("Done", ignoreCase = true) || fullScreenText.contains("Share", ignoreCase = true))
+
+        if (isLiveSuccessScreen) {
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastProcessedTransactionTime < 15000) return
+
+            val matcher = amountRegex.matcher(fullScreenText)
+            if (matcher.find()) {
+                val rawAmountStr = matcher.group(1)?.replace(",", "") ?: return
+                val parsedAmount = rawAmountStr.toDoubleOrNull() ?: return
+
+                if (parsedAmount > 0) {
+                    lastProcessedTransactionTime = currentTime
+                    Log.d(TAG, "💸 Payment Success Detected! Amount: ₹$parsedAmount")
+
+                    serviceScope.launch {
+                        val updatedBalance = repository.deductBalance(parsedAmount)
+                        sendDeductionNotification(parsedAmount, updatedBalance)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sendDeductionNotification(deducted: Double, remaining: Double) {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_save)
+            .setContentTitle("💸 Balance Auto-Updated")
+            .setContentText("Deducted ₹$deducted. New Balance: ₹$remaining")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(7001, notification)
+    }
+
+    private fun sendVerificationReminderNotification() {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("📅 7-Day Balance Check")
+            .setContentText("It's been 7 days! Please open SentryUPI to verify your account balance.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(7002, notification)
+    }
+
+    private fun collectNodeText(node: AccessibilityNodeInfo?, textList: MutableList<String>) {
+        if (node == null) return
+        if (!node.text.isNullOrEmpty()) {
+            textList.add(node.text.toString())
+        }
+        for (i in 0 until node.childCount) {
+            collectNodeText(node.getChild(i), textList)
+        }
     }
 }
