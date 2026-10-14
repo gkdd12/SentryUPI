@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Permissions MUST be here, above <application> -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Allows SentryUPI to see and launch target UPI apps on Android 11+ -->
+    <queries>
+        <package android:name="com.phonepe.app" />
+        <package android:name="net.one97.paytm" />
+        <package android:name="com.google.android.apps.nbu.paisa.user" />
+        <package android:name="in.org.npci.upiapp" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -11,6 +24,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.SentryUPI">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -19,22 +33,28 @@
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".PauseActivity"
+            android:theme="@style/Theme.SentryUPI"
+            android:exported="false" />
+
         <service
             android:name=".services.UPIDetectorService"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService"/>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
+
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
     </application>
 
 </manifest>
