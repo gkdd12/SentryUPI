@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(repository: BudgetRepository, onOpenSettings: () -> Unit) {
+    var validationError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val configState = repository.budgetConfigFlow.collectAsState(initial = BudgetConfig())
     val config = configState.value
@@ -155,7 +156,8 @@ fun DashboardScreen(repository: BudgetRepository, onOpenSettings: () -> Unit) {
             )
 
             Spacer(modifier = Modifier.height(20.dp))
-            Divider()
+            // Optional update if your IDE highlights Divider()
+            HorizontalDivider()
             Spacer(modifier = Modifier.height(20.dp))
 
             Text(text = "Zone Thresholds", fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -194,11 +196,23 @@ fun DashboardScreen(repository: BudgetRepository, onOpenSettings: () -> Unit) {
             )
 
             Spacer(modifier = Modifier.height(24.dp))
+            // Show Validation Error if present
+            validationError?.let { errorMsg ->
+                Text(
+                    text = errorMsg,
+                    color = Color.Red,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
 
-            // Action Buttons
             if (!isEditing) {
                 Button(
-                    onClick = { isEditing = true },
+                    onClick = {
+                        validationError = null
+                        isEditing = true
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("✏️ Edit Details")
@@ -210,12 +224,12 @@ fun DashboardScreen(repository: BudgetRepository, onOpenSettings: () -> Unit) {
                 ) {
                     OutlinedButton(
                         onClick = {
-                            // Reset fields to saved config and lock
                             accountNo = config.lastFourDigits
                             balance = config.currentBalance.toString()
                             a1Threshold = config.greenYellowThreshold.toString()
                             a2Threshold = config.yellowRedThreshold.toString()
                             minBal = config.minBalanceToMaintain.toString()
+                            validationError = null
                             isEditing = false
                         },
                         modifier = Modifier.weight(1f)
@@ -225,17 +239,32 @@ fun DashboardScreen(repository: BudgetRepository, onOpenSettings: () -> Unit) {
 
                     Button(
                         onClick = {
-                            scope.launch {
-                                repository.saveConfig(
-                                    BudgetConfig(
-                                        lastFourDigits = accountNo,
-                                        currentBalance = balance.toDoubleOrNull() ?: 0.0,
-                                        greenYellowThreshold = a1Threshold.toDoubleOrNull() ?: 0.0,
-                                        yellowRedThreshold = a2Threshold.toDoubleOrNull() ?: 0.0,
-                                        minBalanceToMaintain = minBal.toDoubleOrNull() ?: 0.0
-                                    )
-                                )
-                                isEditing = false // Lock back after saving
+                            val parsedA1 = a1Threshold.toDoubleOrNull() ?: 0.0
+                            val parsedA2 = a2Threshold.toDoubleOrNull() ?: 0.0
+                            val parsedMin = minBal.toDoubleOrNull() ?: 0.0
+
+                            when {
+                                parsedA1 <= parsedA2 -> {
+                                    validationError = "⚠️ Green/Yellow boundary (a1) must be greater than Yellow/Red boundary (a2)!"
+                                }
+                                parsedA2 <= parsedMin -> {
+                                    validationError = "⚠️ Yellow/Red boundary (a2) must be greater than Minimum Balance!"
+                                }
+                                else -> {
+                                    validationError = null
+                                    scope.launch {
+                                        repository.saveConfig(
+                                            BudgetConfig(
+                                                lastFourDigits = accountNo,
+                                                currentBalance = balance.toDoubleOrNull() ?: 0.0,
+                                                greenYellowThreshold = parsedA1,
+                                                yellowRedThreshold = parsedA2,
+                                                minBalanceToMaintain = parsedMin
+                                            )
+                                        )
+                                        isEditing = false
+                                    }
+                                }
                             }
                         },
                         modifier = Modifier.weight(1f)

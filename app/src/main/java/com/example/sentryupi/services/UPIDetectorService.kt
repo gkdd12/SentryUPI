@@ -31,6 +31,8 @@ class UPIDetectorService : AccessibilityService() {
     private var lastProcessedTransactionTime: Long = 0L
     private val successKeywords = listOf("Paid successfully", "Payment Successful", "Transfer Successful", "Paid ₹")
     private val amountRegex = Pattern.compile("(?:₹|Rs\\.?)\\s*([0-9,]+(?:\\.[0-9]{1,2})?)")
+    private val dateTimeRegex = Pattern.compile("(\\d{1,2}\\s+[A-Za-z]+\\s+\\d{4}(?:\\s+at|\\s*,)?\\s+\\d{1,2}:\\d{2}\\s*(?:AM|PM)?)", Pattern.CASE_INSENSITIVE)
+    private var lastProcessedTransactionSignature: String = ""
 
     companion object {
         private const val TAG = "SentryUPI_Service"
@@ -58,17 +60,19 @@ class UPIDetectorService : AccessibilityService() {
             ?: event.packageName?.toString()
             ?: return
 
+        // 1. Ignore SentryUPI
         if (activePackage == packageName || activePackage.contains("sentryupi")) return
 
+        // 2. IGNORE System UI (Notification Shade) without resetting lastActivePackage
+        if (activePackage == "com.android.systemui") return
+
         if (TargetUPIApps.contains(activePackage)) {
-            // 1. Detect app launch
             if (activePackage != lastActivePackage) {
                 lastActivePackage = activePackage
                 Log.d(TAG, "🟢 Target UPI App Launched: $activePackage")
                 evaluateZoneAndRespond(activePackage)
             }
 
-            // 2. Scan active screen for payment success text nodes
             val rootNode = rootInActiveWindow ?: return
             scanForPaymentSuccess(rootNode)
         } else {
@@ -171,22 +175,31 @@ class UPIDetectorService : AccessibilityService() {
 
         val fullScreenText = allTexts.joinToString(" ")
 
-        // Only trigger if screen explicitly contains payment success AND live action buttons like "Done" or "View Details"
         val isLiveSuccessScreen = successKeywords.any { keyword -> fullScreenText.contains(keyword, ignoreCase = true) }
                 && (fullScreenText.contains("Done", ignoreCase = true) || fullScreenText.contains("Share", ignoreCase = true))
 
         if (isLiveSuccessScreen) {
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - lastProcessedTransactionTime < 15000) return
-
-            val matcher = amountRegex.matcher(fullScreenText)
-            if (matcher.find()) {
-                val rawAmountStr = matcher.group(1)?.replace(",", "") ?: return
+            val amountMatcher = amountRegex.matcher(fullScreenText)
+            if (amountMatcher.find()) {
+                val rawAmountStr = amountMatcher.group(1)?.replace(",", "") ?: return
                 val parsedAmount = rawAmountStr.toDoubleOrNull() ?: return
 
+                // Extract date/time from screen (e.g. "21 September 2026 at 05:19 PM")
+                val dateTimeMatcher = dateTimeRegex.matcher(fullScreenText)
+                val dateTimeStr = if (dateTimeMatcher.find()) dateTimeMatcher.group(1) else ""
+
+                // Construct unique signature for this receipt
+                val currentSignature = "$parsedAmount-$dateTimeStr"
+
+                // Skip if this exact transaction signature was already processed
+                if (currentSignature == lastProcessedTransactionSignature) {
+                    return
+                }
+
                 if (parsedAmount > 0) {
-                    lastProcessedTransactionTime = currentTime
-                    Log.d(TAG, "💸 Payment Success Detected! Amount: ₹$parsedAmount")
+                    lastProcessedTransactionSignature = currentSignature
+                    lastProcessedTransactionTime = System.currentTimeMillis()
+                    Log.d(TAG, "💸 Unique Payment Detected! Signature: $currentSignature")
 
                     serviceScope.launch {
                         val updatedBalance = repository.deductBalance(parsedAmount)
